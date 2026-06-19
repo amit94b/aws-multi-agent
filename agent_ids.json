@@ -1,0 +1,29 @@
+{
+  "super_agent": {
+    "agent_id": "KQHJWTUWHP",
+    "alias_id": "0VFXZV8KWG"
+  },
+  "sub_agents": {
+    "s3": {
+      "agent_id": "P4V5EXWJCN",
+      "alias_id": "E64TI3PTZF"
+    },
+    "iam": {
+      "agent_id": "U1FJGGKIWD",
+      "alias_id": "69AUGJAEVT"
+    },
+    "observability": {
+      "agent_id": "MEHHUBVEGN",
+      "alias_id": "H7GUDL51Z9"
+    },
+    "compute": {
+      "agent_id": "CMFISESVPG",
+      "alias_id": "TVZMCUJNUT"
+    },
+    "vpc": {
+      "agent_id": "VN2RCAJSNU",
+      "alias_id": "OWZZLPKVJZ"
+    }
+  },
+  "region": "eu-west-1"
+}
