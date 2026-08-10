@@ -7,7 +7,7 @@ All orchestration, dependency resolution, and inter-agent communication runs ins
 
 ## Architecture
 
-```
+`````
 User Request
      │
      ▼
