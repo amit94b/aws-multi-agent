@@ -1,6 +1,6 @@
 # AWS Bedrock Multi-Agent Cloud Infrastructure System
 
-A **supervisor + 5 specialist agent** architecture built on Amazon Bedrock.
+A **supervisor + 7 specialist agent** architecture built on Amazon Bedrock.
 All orchestration, dependency resolution, and inter-agent communication runs inside Bedrock — you only need to call the Super Agent.
 
 ---
@@ -14,17 +14,17 @@ User Request
 ┌─────────────────────────────────┐
 │        Super Agent              │  ← Bedrock Supervisor
 │  (CloudInfraSuperAgent)         │    Routes, sequences, synthesises
-└──────┬──────┬──────┬──────┬────┘
-       │      │      │      │
-       ▼      ▼      ▼      ▼    ▼
-  ┌───────┐ ┌─────┐ ┌──────────────┐ ┌────────┐ ┌─────┐
-  │  S3   │ │ IAM │ │Observability │ │Compute │ │ VPC │
-  │ Agent │ │Agent│ │    Agent     │ │ Agent  │ │Agent│
-  └───────┘ └─────┘ └──────────────┘ └────────┘ └─────┘
-       │      │                            │        │
-       ▼      ▼                            ▼        ▼
-  Lambda  Lambda                       Lambda   Lambda
- (boto3)  (boto3)                     (boto3)  (boto3)
+└──────┬──────┬──────┬──────┬─────┴──────┬──────┐
+       │      │      │      │            │      │
+       ▼      ▼      ▼      ▼            ▼      ▼
+  ┌───────┐ ┌─────┐ ┌──────────────┐ ┌────────┐ ┌─────┐ ┌────────┐ ┌──────┐
+  │  S3   │ │ IAM │ │Observability │ │Compute │ │ VPC │ │Database│ │FinOps│
+  │ Agent │ │Agent│ │    Agent     │ │ Agent  │ │Agent│ │ Agent  │ │Agent │
+  └───────┘ └─────┘ └──────────────┘ └────────┘ └─────┘ └────────┘ └──────┘
+       │      │                            │        │         │        │
+       ▼      ▼                            ▼        ▼         ▼        ▼
+  Lambda  Lambda                       Lambda   Lambda    Lambda   Lambda
+ (boto3)  (boto3)                     (boto3)  (boto3)   (boto3)  (boto3)
 ```
 
 ### Inter-Agent Dependency (example: VPC + IAM)
@@ -108,7 +108,7 @@ aws iam attach-role-policy \
 
 ### 4. Deploy Lambda Functions
 
-Create **5 Lambda functions** (Python 3.12 runtime):
+Create **7 Lambda functions** (Python 3.12 runtime):
 
 | Function Name | AGENT_KEY env var |
 |---|---|
@@ -117,8 +117,10 @@ Create **5 Lambda functions** (Python 3.12 runtime):
 | `bedrock-observability-agent` | `observability` |
 | `bedrock-compute-agent` | `compute` |
 | `bedrock-vpc-agent` | `vpc` |
+| `bedrock-database-agent` | `database` |
+| `bedrock-finops-agent` | `finops` |
 
-Each function uses the same `lambda_handlers.py` code. Set the `AGENT_KEY` environment variable to route to the correct handler.
+Each function uses the corresponding `lambda_<agent>.py` code. Set the `AGENT_KEY` environment variable to route to the correct handler if using `lambda_handlers.py`.
 
 Required Lambda execution role permissions (per function):
 
@@ -129,16 +131,21 @@ Required Lambda execution role permissions (per function):
 | Observability | `cloudwatch:*`, `logs:*`, `cloudtrail:*` |
 | Compute | `ec2:RunInstances`, `ec2:Describe*`, `ec2:StopInstances`, `autoscaling:*` |
 | VPC | `ec2:CreateVpc`, `ec2:CreateSubnet`, `ec2:CreateInternetGateway`, `ec2:CreateNatGateway`, `ec2:CreateSecurityGroup`, `ec2:CreateFlowLogs`, `ec2:Describe*`, `ec2:AllocateAddress` |
+| Database | `rds:*`, `dynamodb:*` |
+| FinOps | `ce:GetCostForecast`, `pricing:GetProducts` |
 
 ---
 
 ## Setup (Run Once)
 
 ```bash
-# 1. Update config.py with your values
-#    - AWS_ACCOUNT_ID
-#    - BEDROCK_AGENT_ROLE_ARN
-#    - LAMBDA_ARNS (after deploying Lambda functions)
+# 1. Set your AWS Account ID and region. You can set them as environment variables
+#    or directly edit config.py to replace "***" with your actual values.
+export AWS_ACCOUNT_ID="123456789012"
+export AWS_REGION="eu-west-1"
+
+# NOTE: BEDROCK_AGENT_ROLE_ARN and LAMBDA_ARNS in config.py will automatically
+# use the AWS_ACCOUNT_ID and AWS_REGION variables you provide.
 
 # 2. Create all agents
 python setup_agents.py
@@ -230,7 +237,9 @@ Full prod environment: create a VPC with flow logs, launch a t3.large instance, 
 
 Create a VPC called analytics-vpc, an S3 bucket for VPC flow logs, and enable flow logs delivery to that bucket
 
-Set up a new application environment: VPC, EC2 with instance profile, S3 bucket for logs, and CloudWatch dashboard
+Set up a new application environment: VPC, EC2 with instance profile, RDS instance, S3 bucket for logs, and CloudWatch dashboard
+
+What is the cost forecast for our AWS account this month? Also create a DynamoDB table for user profiles.
 ```
 
 ---

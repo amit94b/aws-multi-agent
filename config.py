@@ -7,29 +7,38 @@ import os
 
 # ── AWS Settings ──────────────────────────────────────────────────────────────
 
-AWS_REGION          = os.environ.get("AWS_REGION", "eu-west-1")
-AWS_ACCOUNT_ID      = os.environ.get("AWS_ACCOUNT_ID", "943086490726")   # ← replace
-BEDROCK_MODEL_ID    = "eu.amazon.nova-lite-v1:0"     # cross-region inference
+AWS_REGION = os.environ.get("AWS_REGION", "eu-west-1")
+
+def _resolve_account_id() -> str:
+    env_id = os.environ.get("AWS_ACCOUNT_ID")
+    if env_id and env_id != "***":
+        return env_id
+    try:
+        import boto3
+        return boto3.client("sts", region_name=AWS_REGION).get_caller_identity()["Account"]
+    except Exception:
+        return env_id or "***"
+
+AWS_ACCOUNT_ID = _resolve_account_id()
+BEDROCK_MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "eu.amazon.nova-lite-v1:0")
 
 # ── IAM Role ─────────────────────────────────────────────────────────────────
-# A single IAM role that all agents assume.  The role must have:
-#   - AmazonBedrockFullAccess
-#   - AWSLambdaRole
-# Create it manually and paste the ARN here (or set the env var).
+# IAM role for Bedrock agents (created/managed automatically by agent_as_code.py).
 BEDROCK_AGENT_ROLE_ARN = os.environ.get(
     "BEDROCK_AGENT_ROLE_ARN",
-    f"arn:aws:iam::943086490726:role/BedrockAgentRole",   # ← replace
+    f"arn:aws:iam::{AWS_ACCOUNT_ID}:role/BedrockAgentRole",
 )
 
 # ── Lambda ARNs ───────────────────────────────────────────────────────────────
-# One Lambda function per specialist agent.
-# Deploy lambda_handlers.py as individual functions (or one dispatcher).
+# Specialist Lambda function ARNs (created/managed automatically by agent_as_code.py).
 LAMBDA_ARNS = {
-    "s3":            f"arn:aws:lambda:eu-west-1:943086490726:function:bedrock-s3-agent",
-    "iam":           f"arn:aws:lambda:eu-west-1:943086490726:function:bedrock-iam-agent",
-    "observability": f"arn:aws:lambda:eu-west-1:943086490726:function:bedrock-observability-agent",
-    "compute":       f"arn:aws:lambda:eu-west-1:943086490726:function:bedrock-compute-agent",
-    "vpc":           f"arn:aws:lambda:eu-west-1:943086490726:function:bedrock-vpc-agent",
+    "s3":            f"arn:aws:lambda:{AWS_REGION}:{AWS_ACCOUNT_ID}:function:bedrock-s3-agent",
+    "iam":           f"arn:aws:lambda:{AWS_REGION}:{AWS_ACCOUNT_ID}:function:bedrock-iam-agent",
+    "observability": f"arn:aws:lambda:{AWS_REGION}:{AWS_ACCOUNT_ID}:function:bedrock-observability-agent",
+    "compute":       f"arn:aws:lambda:{AWS_REGION}:{AWS_ACCOUNT_ID}:function:bedrock-compute-agent",
+    "vpc":           f"arn:aws:lambda:{AWS_REGION}:{AWS_ACCOUNT_ID}:function:bedrock-vpc-agent",
+    "database":      f"arn:aws:lambda:{AWS_REGION}:{AWS_ACCOUNT_ID}:function:bedrock-database-agent",
+    "finops":        f"arn:aws:lambda:{AWS_REGION}:{AWS_ACCOUNT_ID}:function:bedrock-finops-agent",
 }
 
 # ── Agent Instructions ────────────────────────────────────────────────────────
@@ -107,21 +116,46 @@ to create a flow-logs delivery role. Wait for confirmation and the role ARN befo
 Signal this as: { "requires_iam": true, "action": "create_vpc_flow_logs_role", "vpc_id": "..." }
 """,
 
+    "database": """\
+You are the Database Agent, a specialist in AWS managed databases.
+You manage: Amazon RDS, Aurora, and DynamoDB.
+
+Rules:
+- For RDS, ensure Multi-AZ is used for production.
+- For DynamoDB, default to PAY_PER_REQUEST billing mode unless provisioned is requested.
+- Always retrieve endpoints, table ARNs, and connection strings.
+- Check with the VPC Agent if subnets or security groups are required for RDS instances.
+""",
+
+    "finops": """\
+You are the FinOps Agent, a specialist in AWS cost optimization and pricing.
+You manage: AWS Cost Explorer, AWS Pricing Calculator, and budget alarms.
+
+Rules:
+- Provide estimated costs before taking actions when explicitly asked to estimate.
+- When forecasting costs, use the AWS Cost Explorer API.
+- Recommend rightsizing and reserved instances based on historical data.
+- Return structured cost summaries in USD.
+""",
+
     "super": """\
-You are the Cloud Infrastructure Super Agent. You coordinate five specialist agents:
+You are the Cloud Infrastructure Super Agent. You coordinate seven specialist agents:
 
   1. S3 Agent          — storage, buckets, lifecycle policies
   2. IAM Agent         — roles, policies, permissions
   3. Observability Agent — CloudWatch, alarms, logging, tracing
   4. Compute Agent     — EC2, ECS, Lambda, Auto Scaling
   5. VPC Agent         — VPCs, subnets, security groups, routing
+  6. Database Agent    — RDS, DynamoDB, DB parameter groups
+  7. FinOps Agent      — Cost Explorer, pricing estimates, budget alarms
 
 Routing rules:
 - Analyse every incoming request and decide which specialists to involve.
 - For independent tasks, invoke specialists IN PARALLEL.
-- For dependent tasks (e.g., VPC needs an IAM role for Flow Logs), orchestrate the
+- For dependent tasks (e.g., RDS needs a VPC Security Group), orchestrate the
   correct sequence: resolve dependencies first, then continue.
-- Always confirm a dependency is resolved before proceeding (check for "status": "granted").
+- Always confirm a dependency is resolved before proceeding.
+- Query the FinOps agent if the user asks for a cost estimate or billing report.
 - After all specialists respond, consolidate their outputs into a single structured report:
     • Executive Summary
     • Actions taken per domain
@@ -131,7 +165,7 @@ Routing rules:
 Dependency map (check for these automatically):
   VPC Flow Logs  → needs IAM role        → call IAM Agent first
   EC2 launch     → needs VPC + IAM role  → call VPC Agent and IAM Agent first
-  New service    → needs alarms          → call Observability Agent after provisioning
+  RDS launch     → needs VPC + SG        → call VPC Agent first
 
 Never reveal internal routing steps in the final answer unless the user asks.
 """,

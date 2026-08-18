@@ -1,6 +1,8 @@
 """
-streamlit_app.py — AWS Bedrock Multi-Agent Cloud Infrastructure Manager
------------------------------------------------------------------------
+streamlit_app.py — AWS DevOps Command Center
+--------------------------------------------
+A premium Streamlit UI for the AWS Bedrock Multi-Agent System.
+
 Run:
     pip install streamlit boto3
     streamlit run streamlit_app.py
@@ -10,9 +12,10 @@ Prerequisites:
     AWS credentials must be configured (env vars or ~/.aws/credentials)
 """
 
+from __future__ import annotations
+
 import json
 import os
-import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -21,165 +24,470 @@ import boto3
 import streamlit as st
 from botocore.exceptions import ClientError, NoCredentialsError
 
-# ── Page config (must be first Streamlit call) ────────────────────────────────
+# ── Page config (must be the very first Streamlit call) ──────────────────────
 st.set_page_config(
-    page_title="Cloud Infrastructure Manager",
-    page_icon="☁️",
+    page_title="AWS DevOps Command Center",
+    page_icon="🚀",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 IDS_FILE = Path(__file__).parent / "agent_ids.json"
-AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 
 AGENT_META = {
-    "s3":            {"label": "S3 Storage",      "icon": "🪣", "color": "#FF9900"},
-    "iam":           {"label": "IAM",              "icon": "🔐", "color": "#DD344C"},
-    "observability": {"label": "Observability",    "icon": "📊", "color": "#7AA116"},
-    "compute":       {"label": "Compute",          "icon": "💻", "color": "#1A9C3E"},
-    "vpc":           {"label": "VPC / Network",    "icon": "🌐", "color": "#0073BB"},
-    "super":         {"label": "Super Agent",      "icon": "🤖", "color": "#8B5CF6"},
+    "s3":            {"label": "S3 Storage",    "icon": "🪣", "color": "#FF9900"},
+    "iam":           {"label": "IAM",            "icon": "🔐", "color": "#DD344C"},
+    "observability": {"label": "Observability",  "icon": "📊", "color": "#7AA116"},
+    "compute":       {"label": "Compute",        "icon": "💻", "color": "#1A9C3E"},
+    "vpc":           {"label": "VPC / Network",  "icon": "🌐", "color": "#0073BB"},
+    "database":      {"label": "Database",       "icon": "🗄️", "color": "#336791"},
+    "finops":        {"label": "FinOps",         "icon": "💰", "color": "#1A9C3E"},
+    "super":         {"label": "Super Agent",    "icon": "🤖", "color": "#FF9900"},
 }
 
 QUICK_TASKS = {
-    "🪣  List all S3 buckets": "List all S3 buckets in the account with their regions and sizes.",
-    "🔐  Create IAM role for EC2": "Create an IAM role called EC2AppRole that EC2 can assume with S3 read access.",
-    "🌐  Create a new VPC": "Create a VPC called dev-vpc (10.0.0.0/16) with public and private subnets across two AZs.",
-    "🌐  VPC + Flow Logs (IAM dep.)": "Create a VPC called prod-vpc with VPC Flow Logs enabled. Handle any IAM dependencies automatically.",
-    "💻  Describe running instances": "List all running EC2 instances with their types, IPs, and states.",
-    "📊  Create CPU alarm": "Create a CloudWatch alarm for high CPU on instance i-0abc1234 (threshold 80%).",
-    "☁️  Full environment setup": (
-        "Full environment: create a VPC called staging-env, launch a t3.medium Amazon Linux 2 "
-        "instance, set up a CloudWatch CPU alarm at 75%, and give me a summary report."
-    ),
+    "🪣 List all S3 buckets":
+        "List all S3 buckets in the account with their regions and sizes.",
+    "🔐 Create IAM role for Lambda":
+        "Create an IAM role called LambdaExecutionRole that Lambda can assume with AmazonS3ReadOnlyAccess attached.",
+    "🌐 Create a new VPC":
+        "Create a VPC called dev-vpc (10.0.0.0/16) with public and private subnets across two AZs.",
+    "🌐 VPC + Flow Logs":
+        "Create a VPC called prod-vpc with VPC Flow Logs enabled. Handle any IAM role dependencies automatically.",
+    "💻 Describe running instances":
+        "List all running EC2 instances with their types, private IPs, AZs, and states.",
+    "📊 Create CPU alarm":
+        "Create a CloudWatch alarm called high-cpu-alarm for metric CPUUtilization in namespace AWS/EC2 with threshold 80.",
+    "📋 Create CloudWatch log group":
+        "Create a CloudWatch log group called /app/backend with 30-day retention.",
+    "☁️ Full environment setup":
+        "Full DevOps environment: create a VPC called staging-env, launch a t3.medium Amazon Linux 2 instance, "
+        "set up a CloudWatch CPU alarm at 75%, create a log group /app/staging, and give me a full summary report.",
+    "🔐 EC2 instance profile":
+        "Create an IAM role called EC2AppRole that EC2 can assume, then attach AmazonS3ReadOnlyAccess and AmazonDynamoDBReadOnlyAccess to it.",
+    "🗄️ Create DynamoDB table":
+        "Create a DynamoDB table called Users with partition key UserId of type S and PAY_PER_REQUEST billing mode.",
+    "💰 Cost forecast":
+        "What is the estimated cost forecast for this month based on current usage?",
 }
 
-# ── CSS ───────────────────────────────────────────────────────────────────────
+
+# ── Premium CSS ───────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-/* ── Global ── */
-[data-testid="stAppViewContainer"] { background: #0f1117; }
-[data-testid="stSidebar"] { background: #1a1d27; border-right: 1px solid #2d3148; }
+/* ── Import Google Fonts ── */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+/* ── Root variables ── */
+:root {
+    --bg-primary:    #0a0e1a;
+    --bg-secondary:  #0f1520;
+    --bg-card:       #131929;
+    --bg-hover:      #1a2235;
+    --border:        #1e2d45;
+    --border-active: #2a4070;
+    --aws-orange:    #FF9900;
+    --aws-blue:      #146eb4;
+    --aws-dark:      #0f2847;
+    --text-primary:  #e8edf5;
+    --text-secondary:#8b9ab4;
+    --text-muted:    #4a5568;
+    --success:       #22c55e;
+    --warning:       #f59e0b;
+    --error:         #ef4444;
+    --info:          #3b82f6;
+    --purple:        #8b5cf6;
+    --radius:        10px;
+    --radius-lg:     16px;
+    --shadow:        0 4px 24px rgba(0,0,0,0.4);
+    --shadow-sm:     0 2px 8px rgba(0,0,0,0.3);
+}
+
+/* ── Global reset & base ── */
+html, body, [data-testid="stAppViewContainer"] {
+    background: var(--bg-primary) !important;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    color: var(--text-primary);
+}
+
+/* ── Sidebar ── */
+[data-testid="stSidebar"] {
+    background: var(--bg-secondary) !important;
+    border-right: 1px solid var(--border) !important;
+}
+[data-testid="stSidebar"] .stMarkdown { color: var(--text-primary); }
+
+/* ── Remove default Streamlit padding ── */
+.block-container {
+    padding-top: 1.5rem !important;
+    padding-bottom: 1rem !important;
+    max-width: 1400px !important;
+}
+
+/* ── Header bar ── */
+.header-bar {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 16px 20px;
+    background: linear-gradient(135deg, var(--bg-card) 0%, #0f1b2d 100%);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    margin-bottom: 20px;
+    position: relative;
+    overflow: hidden;
+}
+.header-bar::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, var(--aws-orange), var(--aws-blue), var(--aws-orange));
+    background-size: 200% 100%;
+    animation: shimmer 3s linear infinite;
+}
+@keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+.header-logo {
+    width: 44px; height: 44px;
+    background: linear-gradient(135deg, var(--aws-orange), #cc7a00);
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px;
+    flex-shrink: 0;
+    box-shadow: 0 4px 12px rgba(255,153,0,0.3);
+}
+.header-title {
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: -0.02em;
+}
+.header-subtitle {
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    margin-top: 1px;
+}
+.header-badge {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.72rem;
+    color: var(--aws-orange);
+    background: rgba(255,153,0,0.08);
+    border: 1px solid rgba(255,153,0,0.2);
+    border-radius: 20px;
+    padding: 4px 10px;
+}
+
+/* ── Metric cards ── */
+.metrics-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 20px;
+}
+.metric-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    text-align: center;
+    transition: border-color 0.2s, transform 0.2s;
+}
+.metric-card:hover {
+    border-color: var(--border-active);
+    transform: translateY(-1px);
+}
+.metric-icon {
+    font-size: 1.4rem;
+    margin-bottom: 4px;
+}
+.metric-value {
+    font-size: 1.6rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    font-family: 'JetBrains Mono', monospace;
+    line-height: 1;
+}
+.metric-label {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    margin-top: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
 
 /* ── Chat bubbles ── */
+.user-msg {
+    display: flex;
+    justify-content: flex-end;
+    margin: 10px 0 6px 0;
+}
 .user-bubble {
-    background: #1e3a5f;
+    background: linear-gradient(135deg, #1a3a6b, #1e4080);
     border: 1px solid #2563eb;
-    border-radius: 12px 12px 4px 12px;
+    border-radius: 16px 16px 4px 16px;
     padding: 12px 16px;
-    margin: 8px 0 8px 60px;
-    color: #e2e8f0;
-    font-size: 0.95rem;
+    max-width: 80%;
+    color: var(--text-primary);
+    font-size: 0.9rem;
     line-height: 1.6;
+    box-shadow: var(--shadow-sm);
+}
+.user-meta {
+    font-size: 0.68rem;
+    color: var(--text-muted);
+    text-align: right;
+    margin-bottom: 4px;
+    margin-right: 2px;
+}
+.agent-msg {
+    margin: 6px 0 10px 0;
+}
+.agent-meta {
+    font-size: 0.68rem;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
 }
 .agent-bubble {
-    background: #1a1d2e;
-    border: 1px solid #374151;
-    border-radius: 4px 12px 12px 12px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 4px 16px 16px 16px;
     padding: 14px 18px;
-    margin: 8px 60px 8px 0;
-    color: #d1d5db;
-    font-size: 0.95rem;
-    line-height: 1.6;
-}
-.agent-bubble pre {
-    background: #0d1117;
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    padding: 12px;
-    overflow-x: auto;
-    font-size: 0.85rem;
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    line-height: 1.7;
+    box-shadow: var(--shadow-sm);
+    max-width: 90%;
 }
 .agent-bubble code {
-    background: #0d1117;
-    padding: 2px 5px;
-    border-radius: 3px;
-    font-size: 0.85rem;
+    background: rgba(0,0,0,0.3);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.82rem;
+    color: #a78bfa;
+}
+.agent-bubble pre {
+    background: #060d1a;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    overflow-x: auto;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.82rem;
+    color: #a5f3fc;
+    margin: 8px 0;
 }
 
-/* ── Trace cards ── */
+/* ── Trace / activity cards ── */
 .trace-card {
-    background: #111827;
-    border: 1px solid #1f2937;
-    border-left: 3px solid #6366f1;
+    background: rgba(0,0,0,0.2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--border-active);
     border-radius: 6px;
-    padding: 8px 12px;
+    padding: 7px 12px;
     margin: 4px 0;
-    font-size: 0.82rem;
-    color: #9ca3af;
-    font-family: monospace;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    font-family: 'JetBrains Mono', monospace;
+    transition: background 0.15s;
 }
-.trace-card.delegation { border-left-color: #f59e0b; }
-.trace-card.response   { border-left-color: #10b981; }
-.trace-card.tool       { border-left-color: #8b5cf6; }
+.trace-card:hover { background: rgba(0,0,0,0.35); }
+.trace-card.delegation { border-left-color: var(--warning); }
+.trace-card.response   { border-left-color: var(--success); }
+.trace-card.tool       { border-left-color: var(--purple); }
+.trace-card.routing    { border-left-color: var(--info); }
+.trace-card.error      { border-left-color: var(--error); }
 
 /* ── Agent status pills ── */
 .agent-pill {
-    display: inline-flex;
+    display: flex;
     align-items: center;
-    gap: 6px;
-    background: #1f2937;
-    border: 1px solid #374151;
-    border-radius: 20px;
-    padding: 4px 12px;
-    margin: 3px 2px;
-    font-size: 0.8rem;
-    color: #d1d5db;
-    width: 100%;
+    gap: 8px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 8px 12px;
+    margin: 4px 0;
+    font-size: 0.82rem;
+    color: var(--text-primary);
+    transition: border-color 0.2s;
 }
-
-/* ── Session badge ── */
-.session-badge {
-    background: #1f2937;
-    border: 1px solid #374151;
-    border-radius: 6px;
-    padding: 6px 10px;
-    font-size: 0.75rem;
-    color: #6b7280;
-    font-family: monospace;
-}
+.agent-pill:hover { border-color: var(--border-active); }
+.agent-pill .status-dot { width: 7px; height: 7px; border-radius: 50%; margin-left: auto; flex-shrink: 0; }
 
 /* ── Quick task buttons ── */
 .stButton > button {
     width: 100%;
-    text-align: left;
-    background: #1f2937;
-    color: #d1d5db;
-    border: 1px solid #374151;
-    border-radius: 6px;
-    font-size: 0.82rem;
-    padding: 6px 10px;
-    margin: 1px 0;
+    text-align: left !important;
+    background: var(--bg-card) !important;
+    color: var(--text-secondary) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 8px !important;
+    font-size: 0.8rem !important;
+    padding: 7px 10px !important;
+    margin: 2px 0 !important;
+    transition: all 0.15s !important;
+    font-family: 'Inter', sans-serif !important;
 }
 .stButton > button:hover {
-    background: #2d3748;
-    border-color: #6366f1;
-    color: #fff;
+    background: var(--bg-hover) !important;
+    border-color: var(--aws-orange) !important;
+    color: var(--text-primary) !important;
+    transform: translateX(2px);
 }
 
-/* ── Metric cards ── */
-.metric-row {
+/* ── Session badge ── */
+.session-badge {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+    word-break: break-all;
+}
+
+/* ── Thinking animation ── */
+.thinking-bar {
     display: flex;
-    gap: 10px;
-    margin: 8px 0;
-}
-.metric-card {
-    flex: 1;
-    background: #1f2937;
-    border: 1px solid #374151;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
     border-radius: 8px;
-    padding: 12px;
-    text-align: center;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
 }
-.metric-value { font-size: 1.4rem; font-weight: 700; color: #e2e8f0; }
-.metric-label { font-size: 0.72rem; color: #6b7280; margin-top: 2px; }
+.thinking-dots { display: flex; gap: 4px; }
+.thinking-dot {
+    width: 6px; height: 6px;
+    background: var(--aws-orange);
+    border-radius: 50%;
+    animation: pulse-dot 1.2s ease-in-out infinite;
+}
+.thinking-dot:nth-child(2) { animation-delay: 0.2s; }
+.thinking-dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes pulse-dot {
+    0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+    40% { transform: scale(1); opacity: 1; }
+}
 
-/* ── Scrollable chat area ── */
-.chat-container {
-    max-height: 62vh;
-    overflow-y: auto;
-    padding: 8px 0;
+/* ── Empty state ── */
+.empty-state {
+    text-align: center;
+    padding: 60px 20px;
+}
+.empty-icon { font-size: 3.5rem; opacity: 0.5; }
+.empty-title {
+    font-size: 1.1rem;
+    color: var(--text-secondary);
+    margin-top: 16px;
+    font-weight: 500;
+}
+.empty-hint {
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    margin-top: 8px;
+    line-height: 1.6;
+}
+
+/* ── Progress bar for agent calls ── */
+.bar-track {
+    height: 5px;
+    background: var(--border);
+    border-radius: 3px;
+    margin-top: 3px;
+    overflow: hidden;
+}
+.bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.4s ease;
+}
+
+/* ── Section dividers ── */
+.section-header {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin: 16px 0 8px 0;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+}
+
+/* ── Streamlit overrides ── */
+[data-testid="stTextArea"] textarea {
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 10px !important;
+    color: var(--text-primary) !important;
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.9rem !important;
+    transition: border-color 0.2s !important;
+}
+[data-testid="stTextArea"] textarea:focus {
+    border-color: var(--aws-orange) !important;
+    box-shadow: 0 0 0 3px rgba(255,153,0,0.1) !important;
+}
+[data-testid="stForm"] {
+    border: none !important;
+    padding: 0 !important;
+}
+/* Primary send button */
+[data-testid="stFormSubmitButton"] > button[kind="primary"] {
+    background: linear-gradient(135deg, var(--aws-orange), #cc7a00) !important;
+    color: #000 !important;
+    font-weight: 600 !important;
+    border: none !important;
+    border-radius: 10px !important;
+    font-size: 0.9rem !important;
+    padding: 10px !important;
+    transition: all 0.2s !important;
+    letter-spacing: 0.01em !important;
+}
+[data-testid="stFormSubmitButton"] > button[kind="primary"]:hover {
+    background: linear-gradient(135deg, #ffaa1a, #e68a00) !important;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 16px rgba(255,153,0,0.35) !important;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: var(--bg-primary); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-active); }
+
+/* Sidebar section title */
+.sidebar-section {
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-muted);
+    margin: 16px 0 8px 0;
+    padding-left: 2px;
+}
+
+/* Expander override */
+[data-testid="stExpander"] {
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 8px !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -188,14 +496,14 @@ st.markdown("""
 # ── Session state ─────────────────────────────────────────────────────────────
 def init_state() -> None:
     defaults = {
-        "messages": [],          # [{role, content, timestamp, traces}]
-        "session_id": str(uuid.uuid4()),
-        "agent_ids": None,
-        "task_count": 0,
-        "agent_calls": {},       # {agent_key: count}
-        "errors": 0,
-        "runtime_client": None,
-        "bedrock_client": None,
+        "messages":      [],          # [{role, content, timestamp, traces}]
+        "session_id":    str(uuid.uuid4()),
+        "agent_ids":     None,
+        "task_count":    0,
+        "agent_calls":   {},          # {agent_key: count}
+        "errors":        0,
+        "region":        None,
+        "pending_task":  None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -211,7 +519,6 @@ def get_clients(region: str):
     try:
         runtime = boto3.client("bedrock-agent-runtime", region_name=region)
         mgmt    = boto3.client("bedrock-agent",         region_name=region)
-        # Validate credentials with a cheap call
         boto3.client("sts", region_name=region).get_caller_identity()
         return runtime, mgmt, None
     except NoCredentialsError:
@@ -225,7 +532,7 @@ def get_clients(region: str):
 def load_agent_ids(path: str):
     p = Path(path)
     if not p.exists():
-        return None, f"agent_ids.json not found at {path}. Run setup_agents.py first."
+        return None, f"agent_ids.json not found at {path}. Run: python setup_agents.py"
     try:
         with open(p) as f:
             return json.load(f), None
@@ -245,22 +552,26 @@ def get_agent_status(agent_id: str, region: str) -> str:
 
 
 # ── Routing hints ─────────────────────────────────────────────────────────────
-def routing_hints(task: str) -> list[str]:
+def routing_hints(task: str) -> list[tuple[str, str]]:
     t = task.lower()
     hints = []
     if any(k in t for k in ["s3", "bucket", "storage", "lifecycle"]):
         hints.append(("s3", "S3 Storage Agent"))
-    if any(k in t for k in ["iam", "role", "policy", "permission"]):
+    if any(k in t for k in ["iam", "role", "policy", "permission", "profile"]):
         hints.append(("iam", "IAM Agent"))
-    if any(k in t for k in ["vpc", "subnet", "security group", "nat", "network"]):
+    if any(k in t for k in ["vpc", "subnet", "security group", "nat", "network", "cidr"]):
         hints.append(("vpc", "VPC Agent"))
         if "flow log" in t:
             hints.append(("iam", "IAM Agent (Flow Logs dependency)"))
-    if any(k in t for k in ["ec2", "instance", "compute", "launch", "asg", "lambda"]):
+    if any(k in t for k in ["ec2", "instance", "compute", "launch", "asg", "auto scaling", "ami"]):
         hints.append(("compute", "Compute Agent"))
-    if any(k in t for k in ["alarm", "cloudwatch", "cloudtrail", "log", "metric", "monitor", "observ"]):
+    if any(k in t for k in ["alarm", "cloudwatch", "cloudtrail", "log group", "metric", "monitor", "dashboard", "observ"]):
         hints.append(("observability", "Observability Agent"))
-    # Deduplicate by key, preserving (key, label) order
+    if any(k in t for k in ["rds", "aurora", "dynamodb", "database", "db"]):
+        hints.append(("database", "Database Agent"))
+    if any(k in t for k in ["cost", "price", "forecast", "budget", "billing"]):
+        hints.append(("finops", "FinOps Agent"))
+    # Deduplicate
     seen = {}
     for k, label in hints:
         if k not in seen:
@@ -269,11 +580,10 @@ def routing_hints(task: str) -> list[str]:
 
 
 # ── Invoke agent (streaming) ──────────────────────────────────────────────────
-def invoke_agent(task: str, agent_id: str, alias_id: str,
-                 runtime_client, session_id: str):
+def invoke_agent(task: str, agent_id: str, alias_id: str, runtime_client, session_id: str):
     """
     Call Bedrock invoke_agent and yield (event_type, data) tuples.
-    event_type: "text" | "delegation" | "tool" | "response" | "error"
+    event_type: "text" | "delegation" | "tool" | "response" | "rationale" | "error"
     """
     try:
         resp = runtime_client.invoke_agent(
@@ -289,19 +599,19 @@ def invoke_agent(task: str, agent_id: str, alias_id: str,
 
             elif "trace" in event:
                 trace = event["trace"].get("trace", {})
-                orch = trace.get("orchestrationTrace", {})
+                orch  = trace.get("orchestrationTrace", {})
 
                 if "rationale" in orch:
                     text = orch["rationale"].get("text", "")
                     if text:
-                        yield "rationale", text[:300]
+                        yield "rationale", text[:400]
 
                 inv = orch.get("invocationInput", {})
                 if "agentCollaboratorInvocationInput" in inv:
                     c = inv["agentCollaboratorInvocationInput"]
                     yield "delegation", {
                         "agent": c.get("agentCollaboratorName", "sub-agent"),
-                        "input": c.get("input", {}).get("text", "")[:200],
+                        "input": c.get("input", {}).get("text", "")[:300],
                     }
                 if "actionGroupInvocationInput" in inv:
                     ag = inv["actionGroupInvocationInput"]
@@ -311,8 +621,8 @@ def invoke_agent(task: str, agent_id: str, alias_id: str,
                 if "agentCollaboratorObservation" in obs:
                     c = obs["agentCollaboratorObservation"]
                     yield "response", {
-                        "agent": c.get("agentCollaboratorName", "sub-agent"),
-                        "output": c.get("output", {}).get("text", "")[:400],
+                        "agent":  c.get("agentCollaboratorName", "sub-agent"),
+                        "output": c.get("output", {}).get("text", "")[:500],
                     }
 
     except ClientError as e:
@@ -321,50 +631,75 @@ def invoke_agent(task: str, agent_id: str, alias_id: str,
         yield "error", str(e)
 
 
+# ── Load configuration ────────────────────────────────────────────────────────
+agent_ids, load_error = load_agent_ids(str(IDS_FILE))
+
+# Determine region: prefer agent_ids.json → env var → fallback
+if agent_ids:
+    st.session_state.region = agent_ids.get("region", os.environ.get("AWS_REGION", "us-east-1"))
+else:
+    st.session_state.region = os.environ.get("AWS_REGION", "us-east-1")
+
+region = st.session_state.region
+runtime_client, mgmt_client, cred_error = get_clients(region)
+
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## ☁️ Cloud Agent Manager")
+    # Brand
+    st.markdown("""
+    <div style="text-align:center;padding:16px 8px 8px">
+        <div style="font-size:2rem">🚀</div>
+        <div style="font-size:1rem;font-weight:700;color:#e8edf5;margin-top:6px">DevOps Command</div>
+        <div style="font-size:0.72rem;color:#8b9ab4;margin-top:2px">AWS Bedrock Multi-Agent</div>
+    </div>
+    """, unsafe_allow_html=True)
+
     st.markdown("---")
 
-    # ── AWS config
-    with st.expander("⚙️ AWS Configuration", expanded=False):
-        region = st.text_input("Region", value=AWS_REGION, key="region_input")
-        ids_path = st.text_input("agent_ids.json path", value=str(IDS_FILE))
-        if st.button("🔄 Reload", use_container_width=True):
+    # ── AWS Configuration
+    st.markdown('<div class="sidebar-section">⚙️ Configuration</div>', unsafe_allow_html=True)
+    with st.expander("AWS Settings", expanded=False):
+        region_input = st.text_input("Region", value=region, key="region_override")
+        ids_path_input = st.text_input("agent_ids.json path", value=str(IDS_FILE), key="ids_path")
+        if st.button("🔄 Reload Config", use_container_width=True):
             st.cache_data.clear()
             st.cache_resource.clear()
             st.rerun()
 
-    runtime_client, mgmt_client, cred_error = get_clients(
-        st.session_state.get("region_input", AWS_REGION)
-    )
-
     # ── Connection status
-    st.markdown("### 🔌 Connection")
+    st.markdown('<div class="sidebar-section">🔌 Connection</div>', unsafe_allow_html=True)
     if cred_error:
-        st.error(f"❌ {cred_error}")
+        st.error(f"❌ {cred_error}", icon="⚠️")
     else:
-        st.success("✅ AWS Connected")
+        identity_str = ""
+        try:
+            identity = boto3.client("sts", region_name=region).get_caller_identity()
+            acct = identity.get("Account", "")
+            identity_str = f"Account: {acct}"
+        except Exception:
+            pass
+        st.success(f"✅ Connected · {region}", icon="🔗")
+        if identity_str:
+            st.caption(identity_str)
 
-    agent_ids, load_error = load_agent_ids(st.session_state.get("agent_ids.json path", str(IDS_FILE)) or str(IDS_FILE))
     if load_error:
-        st.warning(f"⚠️ {load_error}")
-        agent_ids = None
-    else:
-        st.session_state.agent_ids = agent_ids
+        st.warning(f"⚠️ {load_error}", icon="📋")
 
     st.markdown("---")
 
-    # ── Agent status panel
-    st.markdown("### 🤖 Agent Status")
+    # ── Agent Status Panel
+    st.markdown('<div class="sidebar-section">🤖 Agent Fleet</div>', unsafe_allow_html=True)
     if agent_ids and not cred_error:
         super_id = agent_ids["super_agent"]["agent_id"]
-        status = get_agent_status(super_id, st.session_state.get("region_input", AWS_REGION))
-        color = "#10b981" if status == "PREPARED" else "#f59e0b"
+        status   = get_agent_status(super_id, region)
+        dot_color = "#22c55e" if status == "PREPARED" else "#f59e0b"
         st.markdown(
-            f'<div class="agent-pill">{AGENT_META["super"]["icon"]} '
-            f'<b style="color:{AGENT_META["super"]["color"]}">Super Agent</b> '
-            f'<span style="margin-left:auto;color:{color};font-size:0.75rem">● {status}</span></div>',
+            f'<div class="agent-pill">'
+            f'{AGENT_META["super"]["icon"]} '
+            f'<b style="color:{AGENT_META["super"]["color"]}">{AGENT_META["super"]["label"]}</b>'
+            f'<span class="status-dot" style="background:{dot_color}" title="{status}"></span>'
+            f'</div>',
             unsafe_allow_html=True,
         )
         for key, meta in AGENT_META.items():
@@ -372,74 +707,134 @@ with st.sidebar:
                 continue
             sub_id = agent_ids["sub_agents"].get(key, {}).get("agent_id", "")
             if sub_id:
-                sub_status = get_agent_status(sub_id, st.session_state.get("region_input", AWS_REGION))
-                col = "#10b981" if sub_status == "PREPARED" else "#f59e0b"
+                sub_status = get_agent_status(sub_id, region)
+                dot = "#22c55e" if sub_status == "PREPARED" else "#f59e0b"
                 st.markdown(
-                    f'<div class="agent-pill">{meta["icon"]} '
-                    f'<b style="color:{meta["color"]}">{meta["label"]}</b>'
-                    f'<span style="margin-left:auto;color:{col};font-size:0.75rem">● {sub_status}</span></div>',
+                    f'<div class="agent-pill">'
+                    f'{meta["icon"]} {meta["label"]}'
+                    f'<span class="status-dot" style="background:{dot}" title="{sub_status}"></span>'
+                    f'</div>',
                     unsafe_allow_html=True,
                 )
     else:
         for key, meta in AGENT_META.items():
             st.markdown(
-                f'<div class="agent-pill">{meta["icon"]} {meta["label"]}'
-                f'<span style="margin-left:auto;color:#6b7280;font-size:0.75rem">● N/A</span></div>',
+                f'<div class="agent-pill">'
+                f'{meta["icon"]} {meta["label"]}'
+                f'<span class="status-dot" style="background:#4a5568"></span>'
+                f'</div>',
                 unsafe_allow_html=True,
             )
 
     st.markdown("---")
 
-    # ── Session controls
-    st.markdown("### 🗂️ Session")
+    # ── Session
+    st.markdown('<div class="sidebar-section">🗂️ Session</div>', unsafe_allow_html=True)
     st.markdown(
-        f'<div class="session-badge">ID: {st.session_state.session_id[:18]}...</div>',
+        f'<div class="session-badge">ID: {st.session_state.session_id[:16]}…</div>',
         unsafe_allow_html=True,
     )
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("🆕 New", use_container_width=True):
+        if st.button("🆕 New", use_container_width=True, key="new_session_btn"):
             st.session_state.session_id = str(uuid.uuid4())
-            st.toast("New session started", icon="🆕")
+            st.toast("New session started!", icon="🆕")
     with col2:
-        if st.button("🗑️ Clear", use_container_width=True):
-            st.session_state.messages = []
-            st.session_state.task_count = 0
+        if st.button("🗑️ Clear", use_container_width=True, key="clear_chat_btn"):
+            st.session_state.messages   = []
+            st.session_state.task_count  = 0
             st.session_state.agent_calls = {}
-            st.session_state.errors = 0
+            st.session_state.errors      = 0
             st.toast("Chat cleared", icon="🗑️")
 
     st.markdown("---")
 
-    # ── Quick tasks
-    st.markdown("### ⚡ Quick Tasks")
+    # ── Quick Tasks
+    st.markdown('<div class="sidebar-section">⚡ Quick Tasks</div>', unsafe_allow_html=True)
     for label, task_text in QUICK_TASKS.items():
-        if st.button(label, use_container_width=True):
-            st.session_state["pending_task"] = task_text
+        if st.button(label, use_container_width=True, key=f"qt_{label[:20]}"):
+            st.session_state.pending_task = task_text
+
+    st.markdown("---")
+
+    # ── Dependency map
+    with st.expander("📋 Dependency Map", expanded=False):
+        st.markdown("""
+**Auto-resolved by Super Agent:**
+
+🌐 **VPC + Flow Logs**
+→ IAM creates delivery role
+→ VPC Agent receives role ARN
+
+💻 **EC2 launch**
+→ VPC provides subnet
+→ IAM provides instance profile
+→ Compute launches instance
+
+☁️ **New service**
+→ Resources provisioned
+→ Observability adds alarms
+        """)
+
+    # ── Export
+    with st.expander("💾 Export Chat", expanded=False):
+        if st.session_state.messages:
+            export_data = [
+                {"role": m["role"], "content": m["content"], "timestamp": m.get("timestamp", "")}
+                for m in st.session_state.messages
+            ]
+            st.download_button(
+                "⬇️ Download JSON",
+                data=json.dumps(export_data, indent=2),
+                file_name=f"devops-chat-{st.session_state.session_id[:8]}.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+        else:
+            st.caption("No messages to export yet.")
 
 
-# ── Main panel ────────────────────────────────────────────────────────────────
-st.markdown("## ☁️ Cloud Infrastructure Super Agent")
+# ── Main Panel ────────────────────────────────────────────────────────────────
+
+# ── Header
+st.markdown("""
+<div class="header-bar">
+    <div class="header-logo">🚀</div>
+    <div>
+        <div class="header-title">AWS DevOps Command Center</div>
+        <div class="header-subtitle">Supervisor + 5 Specialist Agents · Amazon Bedrock</div>
+    </div>
+    <div class="header-badge">
+        <span style="width:6px;height:6px;background:#22c55e;border-radius:50%;animation:pulse-dot 2s infinite"></span>
+        Live
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
 # ── Metrics row
-total_calls = sum(st.session_state.agent_calls.values()) if st.session_state.agent_calls else 0
+total_calls = sum(st.session_state.agent_calls.values())
+exchanges   = len([m for m in st.session_state.messages if m["role"] == "user"])
 st.markdown(
     f"""
-    <div class="metric-row">
+    <div class="metrics-row">
         <div class="metric-card">
+            <div class="metric-icon">📤</div>
             <div class="metric-value">{st.session_state.task_count}</div>
             <div class="metric-label">Tasks Sent</div>
         </div>
         <div class="metric-card">
+            <div class="metric-icon">🤖</div>
             <div class="metric-value">{total_calls}</div>
             <div class="metric-label">Agent Calls</div>
         </div>
         <div class="metric-card">
-            <div class="metric-value">{len(st.session_state.messages) // 2}</div>
+            <div class="metric-icon">💬</div>
+            <div class="metric-value">{exchanges}</div>
             <div class="metric-label">Exchanges</div>
         </div>
         <div class="metric-card">
-            <div class="metric-value" style="color:#f87171">{st.session_state.errors}</div>
+            <div class="metric-icon">❌</div>
+            <div class="metric-value" style="color:{'#ef4444' if st.session_state.errors else '#e8edf5'}">{st.session_state.errors}</div>
             <div class="metric-label">Errors</div>
         </div>
     </div>
@@ -447,24 +842,29 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ── Two-column layout: chat | trace
-chat_col, trace_col = st.columns([2, 1])
+# ── Two-column layout
+chat_col, trace_col = st.columns([3, 1], gap="medium")
+
 
 # ── Chat column ───────────────────────────────────────────────────────────────
 with chat_col:
-    # Render history
-    chat_container = st.container(height=500)
+    # ── Chat history
+    chat_container = st.container(height=520)
     with chat_container:
         if not st.session_state.messages:
             st.markdown(
                 """
-                <div style="text-align:center;padding:60px 20px;color:#4b5563">
-                    <div style="font-size:3rem">☁️</div>
-                    <div style="font-size:1.1rem;margin-top:12px;color:#6b7280">
-                        Ask anything about your AWS infrastructure
-                    </div>
-                    <div style="font-size:0.85rem;margin-top:8px;color:#374151">
-                        Use quick tasks on the left or type your own request below
+                <div class="empty-state">
+                    <div class="empty-icon">🚀</div>
+                    <div class="empty-title">AWS DevOps Command Center</div>
+                    <div class="empty-hint">
+                        Ask anything about your AWS infrastructure.<br>
+                        Use the quick tasks panel on the left, or type your own request below.
+                        <br><br>
+                        <b>Examples:</b><br>
+                        "Create a VPC with flow logs"<br>
+                        "List all running EC2 instances"<br>
+                        "Set up a full staging environment"
                     </div>
                 </div>
                 """,
@@ -475,92 +875,115 @@ with chat_col:
                 ts = msg.get("timestamp", "")
                 if msg["role"] == "user":
                     st.markdown(
-                        f'<div class="user-bubble">'
-                        f'<span style="font-size:0.7rem;color:#6b7280">You · {ts}</span><br>'
-                        f'{msg["content"]}'
-                        f'</div>',
+                        f'<div class="user-meta">You · {ts}</div>'
+                        f'<div class="user-msg"><div class="user-bubble">{msg["content"]}</div></div>',
                         unsafe_allow_html=True,
                     )
                 else:
-                    # Render assistant message with markdown
-                    with st.container():
-                        st.markdown(
-                            f'<div style="font-size:0.7rem;color:#6b7280;margin-bottom:4px">'
-                            f'🤖 Super Agent · {ts}</div>',
-                            unsafe_allow_html=True,
-                        )
-                        st.markdown(
-                            f'<div class="agent-bubble">{msg["content"]}</div>',
-                            unsafe_allow_html=True,
-                        )
+                    st.markdown(
+                        f'<div class="agent-meta">🤖 Super Agent · {ts}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown(
+                        f'<div class="agent-msg"><div class="agent-bubble">{msg["content"]}</div></div>',
+                        unsafe_allow_html=True,
+                    )
 
     # ── Input area
-    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
-    # Check for pending quick task
+    # Consume pending quick task
     pending = st.session_state.pop("pending_task", None)
 
     with st.form("chat_form", clear_on_submit=True):
         user_input = st.text_area(
             "Task",
             value=pending or "",
-            placeholder="e.g. Create a VPC called prod-vpc with flow logs, or list all S3 buckets...",
+            placeholder="e.g. Create a VPC called prod-vpc with flow logs, or list all S3 buckets…",
             height=90,
             label_visibility="collapsed",
+            key="task_input",
         )
-        submitted = st.form_submit_button("▶ Send", use_container_width=True, type="primary")
+        send_col, hint_col = st.columns([2, 3])
+        with send_col:
+            submitted = st.form_submit_button(
+                "▶ Send to Super Agent",
+                use_container_width=True,
+                type="primary",
+            )
+        with hint_col:
+            st.markdown(
+                '<div style="font-size:0.75rem;color:#4a5568;padding-top:8px;line-height:1.4">'
+                '💡 Tip: The Super Agent automatically delegates to specialist sub-agents and resolves dependencies.'
+                '</div>',
+                unsafe_allow_html=True,
+            )
 
+    # ── Handle submission
     if submitted and user_input.strip():
         task = user_input.strip()
-        now = datetime.now().strftime("%H:%M:%S")
+        now  = datetime.now().strftime("%H:%M:%S")
 
-        # Add user message
-        st.session_state.messages.append({"role": "user", "content": task, "timestamp": now})
+        st.session_state.messages.append({
+            "role":      "user",
+            "content":   task,
+            "timestamp": now,
+        })
         st.session_state.task_count += 1
 
-        # Validate prerequisites
         if not agent_ids:
             st.session_state.messages.append({
-                "role": "assistant",
-                "content": "⚠️ **Agent IDs not loaded.** Please check that `agent_ids.json` exists and is valid.",
+                "role":      "assistant",
+                "content":   "⚠️ **Agent IDs not loaded.**\n\nPlease check that `agent_ids.json` exists and is valid. Run `python setup_agents.py` to create the agents.",
                 "timestamp": now,
-                "traces": [],
+                "traces":    [],
             })
             st.session_state.errors += 1
             st.rerun()
 
         elif not runtime_client:
             st.session_state.messages.append({
-                "role": "assistant",
-                "content": f"⚠️ **AWS connection error:** {cred_error}",
+                "role":      "assistant",
+                "content":   f"⚠️ **AWS connection error:**\n\n{cred_error}",
                 "timestamp": now,
-                "traces": [],
+                "traces":    [],
             })
             st.session_state.errors += 1
             st.rerun()
 
         else:
-            super_agent_id  = agent_ids["super_agent"]["agent_id"]
-            super_alias_id  = agent_ids["super_agent"]["alias_id"]
+            super_agent_id = agent_ids["super_agent"]["agent_id"]
+            super_alias_id = agent_ids["super_agent"]["alias_id"]
 
-            # Show routing hints immediately
+            # Show routing hints
             hints = routing_hints(task)
             if hints:
-                hint_text = " · ".join(
+                hint_text = " → ".join(
                     f'{AGENT_META[k]["icon"]} {label}' for k, label in hints
                 )
                 st.markdown(
-                    f'<div class="trace-card">🔍 Likely routing: {hint_text}</div>',
+                    f'<div class="trace-card routing">🔍 Routing: {hint_text}</div>',
                     unsafe_allow_html=True,
                 )
 
-            # Stream response
+            # Stream live response
             response_parts: list[str] = []
-            traces: list[dict] = []
+            traces:          list[dict] = []
+            response_ph = st.empty()
+            trace_ph    = st.empty()
 
-            with st.spinner("Super Agent is thinking..."):
-                response_placeholder = st.empty()
-                trace_placeholder    = st.empty()
+            with st.spinner(""):
+                trace_ph.markdown(
+                    '<div class="thinking-bar">'
+                    '<div class="thinking-dots">'
+                    '<div class="thinking-dot"></div>'
+                    '<div class="thinking-dot"></div>'
+                    '<div class="thinking-dot"></div>'
+                    '</div>'
+                    'Super Agent is thinking…'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
 
                 for event_type, data in invoke_agent(
                     task, super_agent_id, super_alias_id,
@@ -569,7 +992,7 @@ with chat_col:
                     if event_type == "text":
                         response_parts.append(data)
                         current = "".join(response_parts)
-                        response_placeholder.markdown(
+                        response_ph.markdown(
                             f'<div class="agent-bubble">{current}▌</div>',
                             unsafe_allow_html=True,
                         )
@@ -577,33 +1000,37 @@ with chat_col:
                     elif event_type == "delegation":
                         agent_key = next(
                             (k for k, m in AGENT_META.items()
-                             if m["label"].lower() in data["agent"].lower()), "super"
+                             if m["label"].lower().replace(" / ", " ").replace(" ", "")
+                                in data["agent"].lower().replace(" ", "")),
+                            "super"
                         )
                         st.session_state.agent_calls[agent_key] = (
                             st.session_state.agent_calls.get(agent_key, 0) + 1
                         )
                         traces.append({"type": "delegation", "data": data})
-                        trace_placeholder.markdown(
+                        inp_preview = data["input"][:160] + ("…" if len(data["input"]) > 160 else "")
+                        trace_ph.markdown(
                             f'<div class="trace-card delegation">'
                             f'↳ Delegating to <b>{data["agent"]}</b><br>'
-                            f'<span style="color:#6b7280">{data["input"][:150]}…</span>'
+                            f'<span style="color:#6b7280;font-size:0.75rem">{inp_preview}</span>'
                             f'</div>',
                             unsafe_allow_html=True,
                         )
 
                     elif event_type == "tool":
                         traces.append({"type": "tool", "data": data})
-                        trace_placeholder.markdown(
-                            f'<div class="trace-card tool">⚙️ Tool: <b>{data}</b></div>',
+                        trace_ph.markdown(
+                            f'<div class="trace-card tool">⚙️ Calling tool: <b>{data}</b></div>',
                             unsafe_allow_html=True,
                         )
 
                     elif event_type == "response":
                         traces.append({"type": "response", "data": data})
-                        trace_placeholder.markdown(
+                        out_preview = data["output"][:200] + ("…" if len(data["output"]) > 200 else "")
+                        trace_ph.markdown(
                             f'<div class="trace-card response">'
                             f'✅ <b>{data["agent"]}</b> responded<br>'
-                            f'<span style="color:#6b7280">{data["output"][:200]}…</span>'
+                            f'<span style="color:#6b7280;font-size:0.75rem">{out_preview}</span>'
                             f'</div>',
                             unsafe_allow_html=True,
                         )
@@ -611,19 +1038,18 @@ with chat_col:
                     elif event_type == "error":
                         st.session_state.errors += 1
                         traces.append({"type": "error", "data": data})
-                        response_placeholder.error(f"❌ {data}")
+                        response_ph.error(f"❌ {data}")
                         break
 
-            final_response = "".join(response_parts)
-            response_placeholder.empty()
-            trace_placeholder.empty()
+            response_ph.empty()
+            trace_ph.empty()
 
-            # Store in history
+            final_response = "".join(response_parts)
             st.session_state.messages.append({
-                "role": "assistant",
-                "content": final_response or "_(no response)_",
+                "role":      "assistant",
+                "content":   final_response or "_(No response received from the agent.)_",
                 "timestamp": datetime.now().strftime("%H:%M:%S"),
-                "traces": traces,
+                "traces":    traces,
             })
 
             st.rerun()
@@ -631,44 +1057,46 @@ with chat_col:
 
 # ── Trace / Activity column ───────────────────────────────────────────────────
 with trace_col:
-    st.markdown("### 🔍 Activity Trace")
+    st.markdown('<div class="section-header">🔍 Activity</div>', unsafe_allow_html=True)
 
-    # Agent call breakdown
+    # ── Agent call breakdown
     if st.session_state.agent_calls:
-        st.markdown("**Calls by agent**")
         total = sum(st.session_state.agent_calls.values()) or 1
-        for key, count in sorted(
-            st.session_state.agent_calls.items(), key=lambda x: -x[1]
-        ):
+        for key, count in sorted(st.session_state.agent_calls.items(), key=lambda x: -x[1]):
             meta = AGENT_META.get(key, {"icon": "?", "label": key, "color": "#888"})
-            pct = int(count / total * 100)
+            pct  = int(count / total * 100)
             st.markdown(
-                f'<div style="margin:4px 0">'
-                f'<div style="display:flex;justify-content:space-between;font-size:0.8rem;color:#9ca3af">'
-                f'<span>{meta["icon"]} {meta["label"]}</span><span>{count} ({pct}%)</span></div>'
-                f'<div style="height:6px;background:#1f2937;border-radius:3px;margin-top:3px">'
-                f'<div style="height:100%;width:{pct}%;background:{meta["color"]};border-radius:3px"></div>'
-                f'</div></div>',
+                f'<div style="margin:6px 0">'
+                f'<div style="display:flex;justify-content:space-between;font-size:0.75rem;color:#8b9ab4;margin-bottom:3px">'
+                f'<span>{meta["icon"]} {meta["label"]}</span>'
+                f'<span style="font-family:monospace">{count} ({pct}%)</span>'
+                f'</div>'
+                f'<div class="bar-track">'
+                f'<div class="bar-fill" style="width:{pct}%;background:{meta["color"]}"></div>'
+                f'</div>'
+                f'</div>',
                 unsafe_allow_html=True,
             )
-        st.markdown("---")
+        st.markdown("<hr style='border-color:#1e2d45;margin:12px 0'>", unsafe_allow_html=True)
 
-    # Latest traces from most recent message
-    last_traces = []
+    # ── Latest traces from most recent message
+    last_traces: list[dict] = []
     for msg in reversed(st.session_state.messages):
         if msg["role"] == "assistant" and msg.get("traces"):
             last_traces = msg["traces"]
             break
 
     if last_traces:
-        st.markdown("**Last exchange**")
+        st.markdown('<div class="sidebar-section">Last Exchange</div>', unsafe_allow_html=True)
         for t in last_traces:
             if t["type"] == "delegation":
                 d = t["data"]
+                inp_p = d["input"][:100] + ("…" if len(d["input"]) > 100 else "")
                 st.markdown(
                     f'<div class="trace-card delegation">'
                     f'↳ <b>{d["agent"]}</b><br>'
-                    f'<span style="color:#6b7280;font-size:0.78rem">{d["input"][:120]}…</span></div>',
+                    f'<span style="color:#6b7280;font-size:0.72rem">{inp_p}</span>'
+                    f'</div>',
                     unsafe_allow_html=True,
                 )
             elif t["type"] == "tool":
@@ -678,60 +1106,64 @@ with trace_col:
                 )
             elif t["type"] == "response":
                 d = t["data"]
+                out_p = d["output"][:120] + ("…" if len(d["output"]) > 120 else "")
                 st.markdown(
                     f'<div class="trace-card response">'
                     f'✅ <b>{d["agent"]}</b><br>'
-                    f'<span style="color:#6b7280;font-size:0.78rem">{d["output"][:150]}…</span></div>',
+                    f'<span style="color:#6b7280;font-size:0.72rem">{out_p}</span>'
+                    f'</div>',
                     unsafe_allow_html=True,
                 )
             elif t["type"] == "error":
                 st.markdown(
-                    f'<div class="trace-card" style="border-left-color:#ef4444">'
-                    f'❌ {t["data"][:200]}</div>',
+                    f'<div class="trace-card error">❌ {t["data"][:180]}</div>',
                     unsafe_allow_html=True,
                 )
     else:
         st.markdown(
-            '<div style="color:#4b5563;font-size:0.85rem;text-align:center;padding:30px 0">'
-            'Routing traces will appear<br>here during task execution</div>',
+            '<div style="color:#4a5568;font-size:0.8rem;text-align:center;padding:24px 0;line-height:1.6">'
+            '🔍<br>Routing traces &<br>agent responses<br>appear here'
+            '</div>',
             unsafe_allow_html=True,
         )
 
-    st.markdown("---")
+    st.markdown("<hr style='border-color:#1e2d45;margin:12px 0'>", unsafe_allow_html=True)
 
     # ── Dependency map reference
     with st.expander("📋 Dependency Map", expanded=False):
         st.markdown("""
 **Auto-resolved by Super Agent:**
 
-🌐 **VPC + Flow Logs**
-→ IAM Agent creates delivery role
-→ VPC Agent receives role ARN
+🌐 VPC + Flow Logs  
+→ IAM creates role  
+→ VPC receives ARN
 
-💻 **EC2 launch**
-→ VPC Agent provides subnet
-→ IAM Agent provides instance profile
-→ Compute Agent launches instance
+💻 EC2 launch  
+→ VPC provides subnet  
+→ IAM provides profile  
+→ Compute launches
 
-☁️ **New service provisioning**
-→ Compute / VPC create resources
-→ Observability Agent adds alarms
+☁️ New service  
+→ Resources created  
+→ Observability adds alarms
         """)
 
-    # ── Export chat
-    with st.expander("💾 Export Chat", expanded=False):
-        if st.session_state.messages:
-            export = []
-            for m in st.session_state.messages:
-                export.append({"role": m["role"], "content": m["content"],
-                                "timestamp": m.get("timestamp", "")})
-            st.download_button(
-                "⬇️ Download JSON",
-                data=json.dumps(export, indent=2),
-                file_name=f"agent-chat-{st.session_state.session_id[:8]}.json",
-                mime="application/json",
-                use_container_width=True,
-            )
-        else:
-            st.caption("No messages to export yet.")
+    # ── Help & Tips
+    with st.expander("💡 Tips", expanded=False):
+        st.markdown("""
+**Writing good tasks:**
+- Be specific about resource names
+- Mention regions if different from default
+- For complex tasks, describe the full desired end state
 
+**Dependency tasks:**
+- "VPC with flow logs" → automatically fetches IAM role first
+- "Full environment" → orchestrates VPC + IAM + EC2 + Observability
+
+**Useful commands:**
+```
+python setup_agents.py    # (re)create agents
+python invoke_agent.py    # CLI mode
+python invoke_agent.py --demo   # run demo tasks
+```
+        """)

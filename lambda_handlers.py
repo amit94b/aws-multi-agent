@@ -8,7 +8,7 @@ Each function is identified by its function name convention:
     bedrock-s3-agent, bedrock-iam-agent, etc.
 
 You can deploy ONE dispatcher Lambda (set AGENT_KEY env var per function)
-or deploy five separate functions — both patterns work.
+or deploy seven separate functions — both patterns work.
 
 Event format (from Bedrock action groups):
     {
@@ -38,7 +38,11 @@ def get_params(event: dict) -> dict:
 
 
 def ok(body: dict) -> dict:
-    """Wrap a success response for Bedrock."""
+    """Wrap a success response for Bedrock.
+
+    NOTE: Uses module-level event_ref which is set at the top of lambda_handler().
+    This is safe in Lambda's single-threaded execution model.
+    """
     return {
         "actionGroup": event_ref["actionGroup"],
         "function":    event_ref["function"],
@@ -54,7 +58,8 @@ def err(msg: str) -> dict:
     return ok({"status": "error", "message": msg})
 
 
-# We store event context here so ok() / err() can access it
+# Module-level event context so ok() / err() can access it.
+# Set at the top of lambda_handler() before any handler is called.
 event_ref: dict = {}
 
 
@@ -84,13 +89,18 @@ def handle_s3(function_name: str, params: dict) -> dict:
                     "RestrictPublicBuckets": True,
                 },
             )
-            # Versioning
-            if params.get("versioning", "true").lower() != "false":
+            # Versioning: Bedrock may pass boolean True or string "true"/"false"
+            versioning_param = params.get("versioning", True)
+            versioning_enabled = (
+                versioning_param
+                if isinstance(versioning_param, bool)
+                else str(versioning_param).lower() != "false"
+            )
+            if versioning_enabled:
                 s3.put_bucket_versioning(
                     Bucket=bucket,
                     VersioningConfiguration={"Status": "Enabled"},
                 )
-            # Default lifecycle
             expiry = int(params.get("lifecycle_days", 90))
             if expiry > 0:
                 s3.put_bucket_lifecycle_configuration(
@@ -104,7 +114,8 @@ def handle_s3(function_name: str, params: dict) -> dict:
                         }]
                     },
                 )
-            return ok({"status": "created", "bucket": bucket, "region": region, "versioning": True})
+            return ok({"status": "created", "bucket": bucket, "region": region,
+                       "versioning": versioning_enabled})
         except ClientError as e:
             return err(str(e))
 
@@ -508,6 +519,107 @@ def handle_vpc(function_name: str, params: dict) -> dict:
     return err(f"Unknown VPC function: {function_name}")
 
 
+# ── Database handler ──────────────────────────────────────────────────────────
+
+def handle_database(function_name: str, params: dict) -> dict:
+    rds = boto3.client("rds", region_name=AWS_REGION)
+    dynamodb = boto3.client("dynamodb", region_name=AWS_REGION)
+
+    if function_name == "create_rds_instance":
+        kwargs = {
+            "DBInstanceIdentifier": params["db_identifier"],
+            "Engine": params["engine"],
+            "DBInstanceClass": params["instance_class"],
+            "AllocatedStorage": int(params["allocated_storage"]),
+            "MasterUsername": params["master_username"],
+            "MasterUserPassword": params["master_password"],
+        }
+        if "vpc_security_group_ids" in params:
+            kwargs["VpcSecurityGroupIds"] = [s.strip() for s in params["vpc_security_group_ids"].split(",")]
+        if "multi_az" in params:
+            multi_az_val = params["multi_az"]
+            kwargs["MultiAZ"] = multi_az_val.lower() == "true" if isinstance(multi_az_val, str) else bool(multi_az_val)
+            
+        try:
+            resp = rds.create_db_instance(**kwargs)
+            return ok({"status": "creating", "db_instance_identifier": resp["DBInstance"]["DBInstanceIdentifier"]})
+        except ClientError as e:
+            return err(str(e))
+
+    elif function_name == "create_dynamodb_table":
+        billing = params.get("billing_mode", "PAY_PER_REQUEST")
+        key_type = params["key_type"]
+        kwargs = {
+            "TableName": params["table_name"],
+            "KeySchema": [{"AttributeName": params["partition_key"], "KeyType": "HASH"}],
+            "AttributeDefinitions": [{"AttributeName": params["partition_key"], "AttributeType": key_type}],
+            "BillingMode": billing,
+        }
+        if billing == "PROVISIONED":
+            kwargs["ProvisionedThroughput"] = {"ReadCapacityUnits": 5, "WriteCapacityUnits": 5}
+            
+        try:
+            resp = dynamodb.create_table(**kwargs)
+            return ok({"status": "creating", "table_name": resp["TableDescription"]["TableName"], "table_arn": resp["TableDescription"]["TableArn"]})
+        except ClientError as e:
+            return err(str(e))
+
+    return err(f"Unknown Database function: {function_name}")
+
+
+# ── FinOps handler ────────────────────────────────────────────────────────────
+
+def handle_finops(function_name: str, params: dict) -> dict:
+    from datetime import datetime, timedelta
+    
+    if function_name == "get_cost_forecast":
+        ce = boto3.client("ce", region_name="us-east-1")
+        today = datetime.utcnow()
+        start_date = today.strftime('%Y-%m-01')
+        end_date = (today.replace(day=28) + timedelta(days=4)).replace(day=1).strftime('%Y-%m-%d')
+        
+        try:
+            resp = ce.get_cost_forecast(
+                TimePeriod={'Start': start_date, 'End': end_date},
+                Metric='UNBLENDED_COST',
+                Granularity='MONTHLY'
+            )
+            return ok({"forecast": resp.get("Total", {})})
+        except ClientError as e:
+            return err(str(e))
+
+    elif function_name == "get_instance_price":
+        pricing = boto3.client("pricing", region_name="us-east-1")
+        try:
+            resp = pricing.get_products(
+                ServiceCode='AmazonEC2',
+                Filters=[
+                    {'Type': 'TERM_MATCH', 'Field': 'instanceType', 'Value': params["instance_type"]},
+                    {'Type': 'TERM_MATCH', 'Field': 'operatingSystem', 'Value': params.get("os", "Linux")},
+                    {'Type': 'TERM_MATCH', 'Field': 'preInstalledSw', 'Value': 'NA'},
+                    {'Type': 'TERM_MATCH', 'Field': 'tenancy', 'Value': 'Shared'},
+                    {'Type': 'TERM_MATCH', 'Field': 'capacitystatus', 'Value': 'Used'}
+                ],
+                MaxResults=1
+            )
+            if not resp.get("PriceList"):
+                return err(f"No pricing found for {params['instance_type']}")
+            
+            price_item = json.loads(resp["PriceList"][0])
+            terms = price_item.get("terms", {}).get("OnDemand", {})
+            for term_key in terms:
+                price_dimensions = terms[term_key].get("priceDimensions", {})
+                for dim_key in price_dimensions:
+                    price_per_hr = price_dimensions[dim_key].get("pricePerUnit", {}).get("USD")
+                    return ok({"instance_type": params["instance_type"], "os": params.get("os", "Linux"), "price_per_hour_usd": price_per_hr})
+                    
+            return err("Could not parse price from pricing API response")
+        except ClientError as e:
+            return err(str(e))
+
+    return err(f"Unknown FinOps function: {function_name}")
+
+
 # ── Lambda entry point ────────────────────────────────────────────────────────
 
 HANDLER_MAP = {
@@ -516,6 +628,8 @@ HANDLER_MAP = {
     "observability": handle_observability,
     "compute":       handle_compute,
     "vpc":           handle_vpc,
+    "database":      handle_database,
+    "finops":        handle_finops,
 }
 
 
@@ -523,7 +637,7 @@ def lambda_handler(event: dict, context) -> dict:
     """
     Dispatch incoming Bedrock action-group invocations to the correct handler.
     Set the AGENT_KEY environment variable in each Lambda to one of:
-        s3 | iam | observability | compute | vpc
+        s3 | iam | observability | compute | vpc | database | finops
     """
     global event_ref
     event_ref = event

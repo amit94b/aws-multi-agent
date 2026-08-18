@@ -1,18 +1,15 @@
 """
 setup_agents.py
 ---------------
-One-time script to create and wire up all Bedrock agents.
+Provision and wire up all 7 Bedrock specialist agents & the supervisor.
+Part of the Agent-as-Code (AaaC) system.
 
 Run:
-    python setup_agents.py
+    python setup_agents.py           # Setup Bedrock Agents
+    python agent_as_code.py          # Complete 1-Click End-to-End Deploy (IAM + Lambdas + Bedrock)
 
 Output:
-    agent_ids.json  — save this file; it is required by invoke_agent.py
-
-AWS prerequisites:
-    1. IAM role with AmazonBedrockFullAccess + AWSLambdaRole (see config.py)
-    2. Five Lambda functions deployed (see lambda_handlers.py)
-    3. Bedrock model access enabled for BEDROCK_MODEL_ID in your region
+    agent_ids.json  — saved automatically; required by invoke_agent.py & streamlit_app.py
 """
 
 from __future__ import annotations
@@ -251,12 +248,61 @@ def vpc_function_schema() -> list:
     ]
 
 
+def database_function_schema() -> list:
+    return [
+        {
+            "name": "create_rds_instance",
+            "description": "Create an Amazon RDS database instance.",
+            "parameters": {
+                "db_identifier": {"type": "string", "description": "Name of the RDS instance.", "required": True},
+                "engine":        {"type": "string", "description": "Database engine (e.g., postgres, mysql).", "required": True},
+                "instance_class":{"type": "string", "description": "Instance class (e.g., db.t3.micro).", "required": True},
+                "allocated_storage": {"type": "integer", "description": "Storage in GB.", "required": True},
+                "master_username": {"type": "string", "description": "Master username.", "required": True},
+                "master_password": {"type": "string", "description": "Master password.", "required": True},
+                "vpc_security_group_ids": {"type": "string", "description": "Comma-separated security group IDs.", "required": False},
+                "multi_az":      {"type": "boolean", "description": "Enable Multi-AZ.", "required": False},
+            },
+        },
+        {
+            "name": "create_dynamodb_table",
+            "description": "Create an Amazon DynamoDB table.",
+            "parameters": {
+                "table_name":   {"type": "string", "description": "Table name.", "required": True},
+                "partition_key":{"type": "string", "description": "Partition key name.", "required": True},
+                "key_type":     {"type": "string", "description": "Partition key type (S, N, B).", "required": True},
+                "billing_mode": {"type": "string", "description": "PROVISIONED or PAY_PER_REQUEST.", "required": False},
+            },
+        },
+    ]
+
+
+def finops_function_schema() -> list:
+    return [
+        {
+            "name": "get_cost_forecast",
+            "description": "Get a cost forecast for the current month.",
+            "parameters": {},
+        },
+        {
+            "name": "get_instance_price",
+            "description": "Get the on-demand price for an EC2 instance type.",
+            "parameters": {
+                "instance_type": {"type": "string", "description": "EC2 instance type (e.g., t3.medium).", "required": True},
+                "os":            {"type": "string", "description": "Operating system (e.g., Linux, Windows).", "required": False},
+            },
+        },
+    ]
+
+
 SCHEMA_MAP = {
     "s3":            s3_function_schema,
     "iam":           iam_function_schema,
     "observability": observability_function_schema,
     "compute":       compute_function_schema,
     "vpc":           vpc_function_schema,
+    "database":      database_function_schema,
+    "finops":        finops_function_schema,
 }
 
 
@@ -324,18 +370,37 @@ def prepare_agent(agent_id: str) -> str:
     return get_or_create_alias(agent_id)
 
 
+_ACCOUNT_ID_CACHE: str | None = None
+
+
+def _get_account_id() -> str:
+    """Return the AWS account ID, cached after first call."""
+    global _ACCOUNT_ID_CACHE
+    if _ACCOUNT_ID_CACHE is None:
+        _ACCOUNT_ID_CACHE = boto3.client("sts").get_caller_identity()["Account"]
+    return _ACCOUNT_ID_CACHE
+
+
 def allow_bedrock_to_invoke_lambda(function_arn: str, agent_id: str) -> None:
-    """Add resource-based policy so Bedrock agent can invoke the Lambda."""
+    """Add resource-based policy so Bedrock agent can invoke the Lambda.
+
+    The SourceArn must be the Bedrock *agent* ARN (not the foundation model ARN).
+    Using the foundation-model ARN is incorrect and will silently cause
+    'AccessDeniedException: lambda:InvokeFunction' at runtime.
+    """
+    account_id = _get_account_id()
+    agent_arn = f"arn:aws:bedrock:{AWS_REGION}:{account_id}:agent/{agent_id}"
     try:
         lambda_client.add_permission(
             FunctionName=function_arn,
             StatementId=f"bedrock-agent-{agent_id[:8]}",
             Action="lambda:InvokeFunction",
             Principal="bedrock.amazonaws.com",
-            SourceArn=f"arn:aws:bedrock:{AWS_REGION}::foundation-model/{BEDROCK_MODEL_ID}",
+            SourceArn=agent_arn,
         )
+        log.info("  Lambda permission granted: %s → %s", agent_id[:8], function_arn.split(":")[-1])
     except lambda_client.exceptions.ResourceConflictException:
-        pass  # Permission already exists
+        log.info("  Lambda permission already exists — skipping")
 
 
 # ── Agent creation ────────────────────────────────────────────────────────────
@@ -442,6 +507,8 @@ def create_super_agent(sub_agents: dict) -> dict:
         "observability": "ObservabilityAgent",
         "compute":       "ComputeAgent",
         "vpc":           "VPCAgent",
+        "database":      "DatabaseAgent",
+        "finops":        "FinOpsAgent",
     }
 
     already_wired = existing_collaborator_names(agent_id)
@@ -474,9 +541,7 @@ def create_super_agent(sub_agents: dict) -> dict:
     return {"agent_id": agent_id, "alias_id": alias_id}
 
 
-def _get_account_id() -> str:
-    sts = boto3.client("sts")
-    return sts.get_caller_identity()["Account"]
+# _get_account_id() is defined above (near allow_bedrock_to_invoke_lambda)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -494,6 +559,8 @@ def main() -> None:
         ("observability", "ObservabilityAgent"),
         ("compute",       "ComputeAgent"),
         ("vpc",           "VPCAgent"),
+        ("database",      "DatabaseAgent"),
+        ("finops",        "FinOpsAgent"),
     ]:
         sub_agents[key] = create_specialist_agent(name, key)
         log.info("  ✅ %s ready", name)
